@@ -3,12 +3,15 @@ package v7_test
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"code.cloudfoundry.org/cli/actor/actionerror"
+	"code.cloudfoundry.org/cli/actor/sharedaction"
 	"code.cloudfoundry.org/cli/actor/v7action"
 	"code.cloudfoundry.org/cli/command/commandfakes"
 	"code.cloudfoundry.org/cli/command/flag"
 	v7 "code.cloudfoundry.org/cli/command/v7"
+	"code.cloudfoundry.org/cli/command/v7/shared/sharedfakes"
 	"code.cloudfoundry.org/cli/command/v7/v7fakes"
 	"code.cloudfoundry.org/cli/resources"
 	"code.cloudfoundry.org/cli/util/configv3"
@@ -18,26 +21,28 @@ import (
 	. "github.com/onsi/gomega/gbytes"
 )
 
-var _ = Describe("rollback Command", func() {
+var _ = FDescribe("rollback Command", func() {
 	var (
 		app             string
 		binaryName      string
 		executeErr      error
-		fakeActor       *v7fakes.FakeActor
+		fakeActor       *v7fakes.FakeRollbackActor
 		fakeConfig      *commandfakes.FakeConfig
 		fakeSharedActor *commandfakes.FakeSharedActor
 		input           *Buffer
 		testUI          *ui.UI
 
-		cmd v7.RollbackCommand
+		fakeAppStager *sharedfakes.FakeAppStager
+		cmd           v7.RollbackCommand
 	)
 
 	BeforeEach(func() {
 		app = "some-app"
 		binaryName = "faceman"
-		fakeActor = new(v7fakes.FakeActor)
+		fakeActor = new(v7fakes.FakeRollbackActor)
 		fakeConfig = new(commandfakes.FakeConfig)
 		fakeSharedActor = new(commandfakes.FakeSharedActor)
+		fakeAppStager = new(sharedfakes.FakeAppStager)
 		input = NewBuffer()
 		testUI = ui.NewTestUI(input, NewBuffer(), NewBuffer())
 
@@ -66,12 +71,13 @@ var _ = Describe("rollback Command", func() {
 
 		cmd = v7.RollbackCommand{
 			RequiredArgs: flag.AppName{AppName: app},
+			Actor:        fakeActor,
 			BaseCommand: v7.BaseCommand{
 				UI:          testUI,
 				Config:      fakeConfig,
-				Actor:       fakeActor,
 				SharedActor: fakeSharedActor,
 			},
+			Stager: fakeAppStager,
 		}
 	})
 
@@ -198,6 +204,106 @@ var _ = Describe("rollback Command", func() {
 					Expect(testUI.Err).To(Say("warning-3"))
 					Expect(testUI.Err).To(Say("warning-4"))
 					Expect(testUI.Out).To(Say("OK"))
+				})
+
+				Describe("staging logs", func() {
+					When("there are no logging errors", func() {
+						BeforeEach(func() {
+							fakeActor.GetStreamingLogsForApplicationByNameAndSpaceStub = ReturnLogs(
+								[]LogEvent{
+									{Log: sharedaction.NewLogMessage("log-message-1", "OUT", time.Now(), sharedaction.StagingLog, "source-instance")},
+									{Log: sharedaction.NewLogMessage("log-message-2", "OUT", time.Now(), sharedaction.StagingLog, "source-instance")},
+									{Log: sharedaction.NewLogMessage("log-message-3", "OUT", time.Now(), "potato", "source-instance")},
+								},
+								v7action.Warnings{"log-warning-1", "log-warning-2"},
+								nil,
+							)
+						})
+
+						It("displays the staging logs and warnings", func() {
+							Expect(testUI.Out).To(Say("Staging app and tracing logs..."))
+
+							Expect(testUI.Err).To(Say("log-warning-1"))
+							Expect(testUI.Err).To(Say("log-warning-2"))
+
+							Eventually(testUI.Out).Should(Say("log-message-1"))
+							Eventually(testUI.Out).Should(Say("log-message-2"))
+							Eventually(testUI.Out).ShouldNot(Say("log-message-3"))
+
+							Expect(fakeActor.GetStreamingLogsForApplicationByNameAndSpaceCallCount()).To(Equal(1))
+							passedAppName, spaceGUID, _ := fakeActor.GetStreamingLogsForApplicationByNameAndSpaceArgsForCall(0)
+							Expect(passedAppName).To(Equal(app))
+							Expect(spaceGUID).To(Equal("some-space-guid"))
+						})
+					})
+
+					When("there are logging errors", func() {
+						BeforeEach(func() {
+							fakeActor.GetStreamingLogsForApplicationByNameAndSpaceStub = ReturnLogs(
+								[]LogEvent{
+									{Error: errors.New("some-random-err")},
+									{Error: actionerror.LogCacheTimeoutError{}},
+									{Log: sharedaction.NewLogMessage("log-message-1", "OUT", time.Now(), sharedaction.StagingLog, "source-instance")},
+								},
+								v7action.Warnings{"log-warning-1", "log-warning-2"},
+								nil,
+							)
+						})
+
+						It("displays the errors as warnings", func() {
+							Expect(testUI.Out).To(Say("Staging app and tracing logs..."))
+
+							Expect(testUI.Err).To(Say("log-warning-1"))
+							Expect(testUI.Err).To(Say("log-warning-2"))
+							Eventually(testUI.Err).Should(Say("Failed to retrieve logs from Log Cache: some-random-err"))
+							Eventually(testUI.Err).Should(Say("timeout connecting to log server, no log will be shown"))
+
+							Eventually(testUI.Out).Should(Say("log-message-1"))
+						})
+					})
+				})
+
+				When("when getting the application summary succeeds", func() {
+					BeforeEach(func() {
+						summary := v7action.DetailedApplicationSummary{
+							ApplicationSummary: v7action.ApplicationSummary{
+								Application:      resources.Application{},
+								ProcessSummaries: v7action.ProcessSummaries{},
+							},
+							CurrentDroplet: resources.Droplet{},
+						}
+						fakeActor.GetDetailedAppSummaryReturnsOnCall(0, summary, v7action.Warnings{"app-1-summary-warning-1", "app-1-summary-warning-2"}, nil)
+						fakeActor.GetDetailedAppSummaryReturnsOnCall(1, summary, v7action.Warnings{"app-2-summary-warning-1", "app-2-summary-warning-2"}, nil)
+					})
+
+					// TODO: Don't test the shared.AppSummaryDisplayer.AppDisplay method.
+					// Use DI to pass in a new AppSummaryDisplayer to the Command instead.
+					It("displays the app summary", func() {
+						Expect(executeErr).ToNot(HaveOccurred())
+						Expect(fakeActor.GetDetailedAppSummaryCallCount()).To(Equal(2))
+					})
+				})
+
+				When("getting the application summary fails", func() {
+					BeforeEach(func() {
+						fakeActor.GetDetailedAppSummaryReturns(
+							v7action.DetailedApplicationSummary{},
+							v7action.Warnings{"get-application-summary-warnings"},
+							errors.New("get-application-summary-error"),
+						)
+					})
+
+					It("does not display the app summary", func() {
+						Expect(testUI.Out).ToNot(Say(`requested state:`))
+					})
+
+					It("returns the error from GetDetailedAppSummary", func() {
+						Expect(executeErr).To(MatchError("get-application-summary-error"))
+					})
+
+					It("prints the warnings", func() {
+						Expect(testUI.Err).To(Say("get-application-summary-warnings"))
+					})
 				})
 			})
 
