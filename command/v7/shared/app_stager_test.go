@@ -338,7 +338,7 @@ var _ = Describe("app stager", func() {
 			appStager = shared.NewAppStager(fakeActor, testUI, fakeConfig, fakeLogCacheClient)
 			executeErr = appStager.StartApp(
 				app,
-				droplet,
+				droplet.GUID,
 				strategy,
 				noWait,
 				space,

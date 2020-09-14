@@ -39,7 +39,7 @@ type AppStager interface {
 
 	StartApp(
 		app resources.Application,
-		droplet resources.Droplet,
+		resourceGuid string,
 		strategy constant.DeploymentStrategy,
 		noWait bool,
 		space configv3.Space,
@@ -93,7 +93,7 @@ func (stager *Stager) StageAndStart(
 
 	stager.UI.DisplayNewline()
 
-	err = stager.StartApp(app, droplet, strategy, noWait, space, organization, appAction)
+	err = stager.StartApp(app, droplet.GUID, strategy, noWait, space, organization, appAction)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func (stager *Stager) StageApp(app resources.Application, packageGUID string, sp
 
 func (stager *Stager) StartApp(
 	app resources.Application,
-	droplet resources.Droplet,
+	resourceGuid string,
 	strategy constant.DeploymentStrategy,
 	noWait bool,
 	space configv3.Space,
@@ -139,7 +139,9 @@ func (stager *Stager) StartApp(
 				"AppName": app.Name,
 			},
 		)
-		deploymentGUID, warnings, err := stager.Actor.CreateDeploymentByApplicationAndDroplet(app.GUID, droplet.GUID)
+
+		deploymentGUID, warnings, err := stager.Actor.CreateDeploymentByApplicationAndDroplet(app.GUID, resourceGuid)
+
 		stager.UI.DisplayWarnings(warnings)
 		if err != nil {
 			return err
@@ -195,9 +197,9 @@ func (stager *Stager) StartApp(
 			}
 		}
 
-		if droplet.GUID != "" {
+		if resourceGuid != "" {
 			// attach droplet to app
-			warnings, err := stager.Actor.SetApplicationDroplet(app.GUID, droplet.GUID)
+			warnings, err := stager.Actor.SetApplicationDroplet(app.GUID, resourceGuid)
 			stager.UI.DisplayWarnings(warnings)
 			if err != nil {
 				return err
